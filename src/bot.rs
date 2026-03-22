@@ -1,12 +1,21 @@
-use crate::api::WeixinApiClient;
-use crate::errors::{Error, Result};
-use crate::models::{LoginOptions, StartOptions};
-use crate::runtime::monitor_weixin;
-use crate::storage::{self, DEFAULT_BASE_URL};
 use std::sync::Arc;
+
+use snafu::OptionExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::{
+    api::WeixinApiClient,
+    errors::{LoginFailedSnafu, NoAccountSnafu, QrCodeExpiredSnafu, Result},
+    models::{LoginOptions, StartOptions},
+    runtime::monitor_weixin,
+    storage::{self, DEFAULT_BASE_URL},
+};
+
+/// Performs an interactive QR-code login and persists the resulting
+/// credentials.
+///
+/// Returns the account ID on success.
 pub async fn login(options: LoginOptions) -> Result<String> {
     let base_url = options.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL);
     let client = WeixinApiClient::new(base_url, "", None);
@@ -14,13 +23,21 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     let qr_resp = client.fetch_qr_code().await?;
     let qrcode_url = qr_resp["data"]["qrcode_url"]
         .as_str()
-        .ok_or_else(|| Error::LoginFailed("no qrcode_url".into()))?;
+        .context(LoginFailedSnafu {
+            reason: "no qrcode_url",
+        })?;
     let qrcode_id = qr_resp["data"]["qrcode_id"]
         .as_str()
-        .ok_or_else(|| Error::LoginFailed("no qrcode_id".into()))?;
+        .context(LoginFailedSnafu {
+            reason: "no qrcode_id",
+        })?;
 
-    let qr = qrcode::QrCode::new(qrcode_url.as_bytes())
-        .map_err(|e| Error::LoginFailed(format!("QR generation failed: {e}")))?;
+    let qr = qrcode::QrCode::new(qrcode_url.as_bytes()).map_err(|e| {
+        LoginFailedSnafu {
+            reason: format!("QR generation failed: {e}"),
+        }
+        .build()
+    })?;
     let image = qr
         .render::<char>()
         .quiet_zone(true)
@@ -32,26 +49,24 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let status_resp = client.get_qr_code_status(qrcode_id).await?;
-        let status = status_resp["data"]["status"]
-            .as_str()
-            .unwrap_or("unknown");
+        let status = status_resp["data"]["status"].as_str().unwrap_or("unknown");
 
         match status {
-            "wait" => continue,
+            "wait" => {}
             "scaned" => {
                 info!("QR code scanned, waiting for confirmation...");
             }
             "expired" => {
-                return Err(Error::QrCodeExpired);
+                return Err(QrCodeExpiredSnafu.build());
             }
             "confirmed" => {
                 let data = &status_resp["data"];
-                let token = data["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| Error::LoginFailed("no bot_token".into()))?;
-                let bot_id = data["ilink_bot_id"]
-                    .as_str()
-                    .ok_or_else(|| Error::LoginFailed("no ilink_bot_id".into()))?;
+                let token = data["bot_token"].as_str().context(LoginFailedSnafu {
+                    reason: "no bot_token",
+                })?;
+                let bot_id = data["ilink_bot_id"].as_str().context(LoginFailedSnafu {
+                    reason: "no ilink_bot_id",
+                })?;
                 let base = data["baseurl"].as_str().unwrap_or(base_url);
                 let user_id = data["ilink_user_id"].as_str().unwrap_or("");
 
@@ -61,10 +76,10 @@ pub async fn login(options: LoginOptions) -> Result<String> {
                     .to_string();
 
                 let account_data = storage::AccountData {
-                    token: token.to_string(),
+                    token:    token.to_string(),
                     saved_at: chrono::Utc::now().to_rfc3339(),
                     base_url: base.to_string(),
-                    user_id: user_id.to_string(),
+                    user_id:  user_id.to_string(),
                 };
                 storage::save_account_data(&account_id, &account_data)?;
 
@@ -84,13 +99,18 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     }
 }
 
+/// Starts the long-polling message loop for the given agent.
+///
+/// If no `account_id` is specified in `options`, the first saved account is
+/// used.
 pub async fn start(agent: Arc<dyn crate::models::Agent>, options: StartOptions) -> Result<()> {
-    let account_id = match options.account_id {
-        Some(id) => id,
-        None => {
-            let ids = storage::get_account_ids()?;
-            ids.into_iter().next().ok_or(Error::NoAccount)?
-        }
+    let account_id = if let Some(id) = options.account_id {
+        id
+    } else {
+        let ids = storage::get_account_ids()?;
+        ids.into_iter()
+            .next()
+            .ok_or_else(|| NoAccountSnafu.build())?
     };
 
     let account_data = storage::get_account_data(&account_id)?;

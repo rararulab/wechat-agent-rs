@@ -1,0 +1,28 @@
+name: Release-plz
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: arc-runner-set
+    if: ${{ github.repository_owner == 'rararulab' && github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release') }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,83 @@
+name: Rust
+
+on:
+  workflow_call:
+
+concurrency:
+  group: rust-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: true
+  CARGO_INCREMENTAL: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: Clippy
+    runs-on: arc-runner-set
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+  docs:
+    name: Documentation
+    runs-on: arc-runner-set
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Generate documentation
+        run: cargo +nightly doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: Test
+    runs-on: arc-runner-set
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run tests
+        run: cargo nextest run
+
+  rust-success:
+    name: Rust Success
+    runs-on: arc-runner-set
+    needs: [clippy, docs, test]
+    if: always()
+    steps:
+      - name: Check all Rust jobs status
+        env:
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [[ "$CLIPPY_RESULT" != "success" || \
+                "$DOCS_RESULT" != "success" || \
+                "$TEST_RESULT" != "success" ]]; then
+            echo "One or more Rust jobs failed"
+            echo "  clippy: $CLIPPY_RESULT"
+            echo "  docs:   $DOCS_RESULT"
+            echo "  test:   $TEST_RESULT"
+            exit 1
+          fi
+          echo "All Rust jobs passed successfully"

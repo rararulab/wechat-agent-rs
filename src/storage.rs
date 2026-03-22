@@ -1,8 +1,17 @@
-use crate::Result;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+
+use crate::{
+    Result,
+    errors::{IoSnafu, JsonSnafu},
+};
+
+/// Default `WeChat` iLink API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+
+/// Base URL for downloading encrypted media from the `WeChat` CDN.
 pub const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 fn storage_root() -> PathBuf {
@@ -12,67 +21,93 @@ fn storage_root() -> PathBuf {
         .join("openclaw-weixin")
 }
 
+/// Persisted authentication credentials for a single `WeChat` account.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccountData {
-    pub token: String,
+    /// Bearer token used to authenticate API requests.
+    pub token:    String,
+    /// ISO-8601 timestamp of when this data was saved.
     #[serde(rename = "savedAt")]
     pub saved_at: String,
+    /// API base URL for this account.
     #[serde(rename = "baseUrl")]
     pub base_url: String,
+    /// The iLink user ID associated with this account.
     #[serde(rename = "userId")]
-    pub user_id: String,
+    pub user_id:  String,
 }
 
+/// Per-account configuration loaded from local storage.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccountConfig {
+    /// Optional routing tag sent as a header on every API request.
     #[serde(default)]
     pub route_tag: Option<String>,
 }
 
+/// Returns the list of saved account IDs from local storage.
 pub fn get_account_ids() -> Result<Vec<String>> {
     let path = storage_root().join("accounts.json");
     if !path.exists() {
         return Ok(vec![]);
     }
-    let data = std::fs::read_to_string(&path)?;
-    let ids: Vec<String> = serde_json::from_str(&data)?;
+    let data = std::fs::read_to_string(&path).context(IoSnafu)?;
+    let ids: Vec<String> = serde_json::from_str(&data).context(JsonSnafu)?;
     Ok(ids)
 }
 
+/// Persists the given list of account IDs to local storage.
 pub fn save_account_ids(ids: &[String]) -> Result<()> {
     let path = storage_root().join("accounts.json");
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, serde_json::to_string_pretty(ids)?)?;
+    std::fs::create_dir_all(path.parent().unwrap()).context(IoSnafu)?;
+    let json = serde_json::to_string_pretty(ids).context(JsonSnafu)?;
+    std::fs::write(&path, json).context(IoSnafu)?;
     Ok(())
 }
 
+/// Loads the saved credentials for the given account.
 pub fn get_account_data(account_id: &str) -> Result<AccountData> {
-    let path = storage_root().join("accounts").join(format!("{account_id}.json"));
-    let data = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&data)?)
+    let path = storage_root()
+        .join("accounts")
+        .join(format!("{account_id}.json"));
+    let data = std::fs::read_to_string(&path).context(IoSnafu)?;
+    serde_json::from_str(&data).context(JsonSnafu)
 }
 
+/// Saves credentials for the given account to local storage.
 pub fn save_account_data(account_id: &str, data: &AccountData) -> Result<()> {
-    let path = storage_root().join("accounts").join(format!("{account_id}.json"));
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, serde_json::to_string_pretty(data)?)?;
+    let path = storage_root()
+        .join("accounts")
+        .join(format!("{account_id}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).context(IoSnafu)?;
+    let json = serde_json::to_string_pretty(data).context(JsonSnafu)?;
+    std::fs::write(&path, json).context(IoSnafu)?;
     Ok(())
 }
 
+/// Returns the saved long-poll continuation buffer for the given account.
 pub fn get_updates_buf(account_id: &str) -> Option<String> {
-    let path = storage_root().join("get_updates_buf").join(format!("{account_id}.txt"));
+    let path = storage_root()
+        .join("get_updates_buf")
+        .join(format!("{account_id}.txt"));
     std::fs::read_to_string(&path).ok()
 }
 
+/// Saves the long-poll continuation buffer for the given account.
 pub fn save_updates_buf(account_id: &str, buf: &str) -> Result<()> {
-    let path = storage_root().join("get_updates_buf").join(format!("{account_id}.txt"));
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, buf)?;
+    let path = storage_root()
+        .join("get_updates_buf")
+        .join(format!("{account_id}.txt"));
+    std::fs::create_dir_all(path.parent().unwrap()).context(IoSnafu)?;
+    std::fs::write(&path, buf).context(IoSnafu)?;
     Ok(())
 }
 
+/// Loads the optional per-account configuration, returning `None` if absent.
 pub fn get_account_config(account_id: &str) -> Option<AccountConfig> {
-    let path = storage_root().join("config").join(format!("{account_id}.json"));
+    let path = storage_root()
+        .join("config")
+        .join(format!("{account_id}.json"));
     let data = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&data).ok()
 }

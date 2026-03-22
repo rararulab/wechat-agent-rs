@@ -1,13 +1,20 @@
-use crate::api::WeixinApiClient;
-use crate::media::{download_media, upload_media};
-use crate::models::{Agent, ChatRequest, IncomingMedia, MediaType};
-use crate::storage;
+use std::{path::Path, sync::Arc};
+
 use serde_json::Value;
-use std::path::Path;
-use std::sync::Arc;
+use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tracing::{error, warn};
 
+use crate::{
+    api::WeixinApiClient,
+    errors::{HttpSnafu, IoSnafu},
+    media::{download_media, upload_media},
+    models::{Agent, ChatRequest, IncomingMedia, MediaType},
+    storage,
+};
+
+/// Strips `Markdown` formatting from text, returning a plain-text
+/// approximation.
 pub fn markdown_to_plain_text(text: &str) -> String {
     let mut result = text.to_string();
     let code_block_re = regex_lite::Regex::new(r"(?s)```[\s\S]*?```").unwrap();
@@ -29,6 +36,7 @@ pub fn markdown_to_plain_text(text: &str) -> String {
     result.replace('|', " ").trim().to_string()
 }
 
+/// Extracts the text body from a `WeChat` `item_list` JSON array.
 pub fn body_from_item_list(item_list: &[Value]) -> String {
     let mut parts = vec![];
     for item in item_list {
@@ -58,6 +66,7 @@ pub fn body_from_item_list(item_list: &[Value]) -> String {
     parts.join("\n")
 }
 
+/// Runs the long-polling message loop, dispatching each message to `agent`.
 pub async fn monitor_weixin(
     api_client: Arc<Mutex<WeixinApiClient>>,
     agent: Arc<dyn Agent>,
@@ -96,9 +105,7 @@ pub async fn monitor_weixin(
                 warn!("Session expired, need to re-login");
                 break;
             }
-            Err(crate::Error::Http(ref e)) if e.is_timeout() => {
-                continue;
-            }
+            Err(crate::Error::Http { ref source }) if source.is_timeout() => {}
             Err(e) => {
                 consecutive_errors += 1;
                 error!("Error getting updates ({consecutive_errors}): {e}");
@@ -126,15 +133,19 @@ async fn process_message(
     let text = body_from_item_list(&item_list);
 
     if let Some(echo_text) = text.strip_prefix("/echo ") {
-        let client = api_client.lock().await;
-        client.send_text_message(to_user_id, context_token, echo_text).await?;
+        api_client
+            .lock()
+            .await
+            .send_text_message(to_user_id, context_token, echo_text)
+            .await?;
         return Ok(());
     }
 
-    {
-        let client = api_client.lock().await;
-        let _ = client.send_typing(to_user_id, context_token).await;
-    }
+    let _ = api_client
+        .lock()
+        .await
+        .send_typing(to_user_id, context_token)
+        .await;
 
     let incoming_media = extract_media_from_items(&item_list).await;
 
@@ -149,12 +160,19 @@ async fn process_message(
     let client = api_client.lock().await;
     if let Some(ref media) = response.media {
         let http_client = reqwest::Client::new();
-        let media_bytes = http_client.get(&media.url).send().await?.bytes().await?;
+        let media_bytes = http_client
+            .get(&media.url)
+            .send()
+            .await
+            .context(HttpSnafu)?
+            .bytes()
+            .await
+            .context(HttpSnafu)?;
         let tmp_dir = Path::new("/tmp/weixin-agent/media");
-        std::fs::create_dir_all(tmp_dir)?;
+        std::fs::create_dir_all(tmp_dir).context(IoSnafu)?;
         let file_name = media.file_name.as_deref().unwrap_or("file");
         let tmp_path = tmp_dir.join(format!("{}_{file_name}", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp_path, &media_bytes)?;
+        std::fs::write(&tmp_path, &media_bytes).context(IoSnafu)?;
 
         let uploaded = upload_media(&client, &tmp_path).await?;
 
@@ -170,11 +188,20 @@ async fn process_message(
         });
 
         client
-            .send_media_message(to_user_id, context_token, response.text.as_deref(), &file_info)
+            .send_media_message(
+                to_user_id,
+                context_token,
+                response.text.as_deref(),
+                &file_info,
+            )
             .await?;
-    } else if let Some(ref text) = response.text {
+        drop(client);
+    } else if let Some(text) = &response.text {
         let plain = markdown_to_plain_text(text);
-        client.send_text_message(to_user_id, context_token, &plain).await?;
+        client
+            .send_text_message(to_user_id, context_token, &plain)
+            .await?;
+        drop(client);
     }
 
     Ok(())
@@ -184,11 +211,14 @@ async fn extract_media_from_items(item_list: &[Value]) -> Option<IncomingMedia> 
     for item in item_list {
         let item_type = item["type"].as_u64().unwrap_or(0);
         if matches!(item_type, 1..=5) {
-            let file_key = item["body"]["filekey"].as_str()
+            let file_key = item["body"]["filekey"]
+                .as_str()
                 .or_else(|| item["filekey"].as_str())?;
-            let aes_key = item["body"]["aes_key"].as_str()
+            let aes_key = item["body"]["aes_key"]
+                .as_str()
                 .or_else(|| item["aes_key"].as_str())?;
-            let file_name = item["body"]["file_name"].as_str()
+            let file_name = item["body"]["file_name"]
+                .as_str()
                 .or_else(|| item["file_name"].as_str());
 
             if let Ok(path) = download_media(file_key, aes_key, file_name).await {

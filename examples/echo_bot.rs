@@ -1,15 +1,19 @@
-use async_trait::async_trait;
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
+
 use wechat_agent_rs::{Agent, ChatRequest, ChatResponse, LoginOptions, StartOptions, login, start};
 
 struct EchoAgent;
 
-#[async_trait]
 impl Agent for EchoAgent {
-    async fn chat(&self, request: ChatRequest) -> wechat_agent_rs::Result<ChatResponse> {
-        Ok(ChatResponse {
-            text: Some(format!("You said: {}", request.text)),
-            media: None,
+    fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Pin<Box<dyn Future<Output = wechat_agent_rs::Result<ChatResponse>> + Send + '_>> {
+        Box::pin(async move {
+            Ok(ChatResponse {
+                text:  Some(format!("You said: {}", request.text)),
+                media: None,
+            })
         })
     }
 }
@@ -26,9 +30,12 @@ async fn main() -> anyhow::Result<()> {
     println!("Using account: {account_id}");
 
     let agent = Arc::new(EchoAgent);
-    start(agent, StartOptions {
-        account_id: Some(account_id),
-    })
+    start(
+        agent,
+        StartOptions {
+            account_id: Some(account_id),
+        },
+    )
     .await?;
 
     Ok(())

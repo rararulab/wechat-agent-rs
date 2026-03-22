@@ -1,62 +1,100 @@
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use serde::{Deserialize, Serialize};
 
-#[async_trait]
+/// Trait that application code implements to handle incoming chat messages.
+///
+/// The SDK calls [`Agent::chat`] for every incoming message and sends the
+/// returned [`ChatResponse`] back to the `WeChat` user.
 pub trait Agent: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> crate::Result<ChatResponse>;
+    /// Processes an incoming chat request and returns a response.
+    fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<ChatResponse>> + Send + '_>>;
 }
 
+/// An incoming chat message delivered to the agent.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
+    /// Unique identifier for the conversation / user.
     pub conversation_id: String,
-    pub text: String,
-    pub media: Option<IncomingMedia>,
+    /// The text body of the message (may be empty when media-only).
+    pub text:            String,
+    /// Optional media attachment included with the message.
+    pub media:           Option<IncomingMedia>,
 }
 
+/// The agent's reply to be sent back to the user.
 #[derive(Debug, Clone, Default)]
 pub struct ChatResponse {
-    pub text: Option<String>,
+    /// Optional text content of the reply.
+    pub text:  Option<String>,
+    /// Optional media attachment to include in the reply.
     pub media: Option<OutgoingMedia>,
 }
 
+/// A media file received from a `WeChat` user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomingMedia {
+    /// The kind of media (image, audio, video, or generic file).
     pub media_type: MediaType,
-    pub file_path: String,
-    pub mime_type: String,
-    pub file_name: Option<String>,
+    /// Local filesystem path to the downloaded and decrypted file.
+    pub file_path:  String,
+    /// MIME type of the file.
+    pub mime_type:  String,
+    /// Original file name, if available.
+    pub file_name:  Option<String>,
 }
 
+/// A media file to be sent to a `WeChat` user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutgoingMedia {
+    /// The kind of media to send.
     pub media_type: OutgoingMediaType,
-    pub url: String,
-    pub file_name: Option<String>,
+    /// URL from which the SDK will download the file before uploading to
+    /// `WeChat`.
+    pub url:        String,
+    /// Optional file name hint for the uploaded file.
+    pub file_name:  Option<String>,
 }
 
+/// Classification of an incoming media attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
+    /// A still image (JPEG, PNG, etc.).
     Image,
+    /// An audio recording or voice message.
     Audio,
+    /// A video clip.
     Video,
+    /// A generic file attachment.
     File,
 }
 
+/// Classification of an outgoing media attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutgoingMediaType {
+    /// A still image.
     Image,
+    /// A video clip.
     Video,
+    /// A generic file.
     File,
 }
 
+/// Options for the QR-code login flow.
 #[derive(Debug, Clone, Default)]
 pub struct LoginOptions {
+    /// Override the default API base URL.
     pub base_url: Option<String>,
 }
 
+/// Options for starting the message-polling loop.
 #[derive(Debug, Clone, Default)]
 pub struct StartOptions {
+    /// Account ID to use; if `None`, the first saved account is used.
     pub account_id: Option<String>,
 }

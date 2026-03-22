@@ -1,33 +1,56 @@
-use thiserror::Error;
+use snafu::Snafu;
 
-#[derive(Debug, Error)]
+/// Errors that can occur when interacting with the `WeChat` Agent SDK.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum Error {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    /// An HTTP request failed.
+    #[snafu(display("HTTP error: {source}"))]
+    Http { source: reqwest::Error },
 
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    /// JSON serialization or deserialization failed.
+    #[snafu(display("JSON error: {source}"))]
+    Json { source: serde_json::Error },
 
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    /// A filesystem I/O operation failed.
+    #[snafu(display("IO error: {source}"))]
+    Io { source: std::io::Error },
 
-    #[error("API error (code {code}): {message}")]
-    Api { code: i64, message: String },
+    /// The `WeChat` API returned a non-zero error code.
+    #[snafu(display("API error (code {code}): {message}"))]
+    Api {
+        /// The numeric error code from the API.
+        code:    i64,
+        /// The human-readable error message.
+        message: String,
+    },
 
-    #[error("Session expired")]
+    /// The current session has expired and requires re-authentication.
+    #[snafu(display("Session expired"))]
     SessionExpired,
 
-    #[error("QR code expired")]
+    /// The login QR code has expired before being scanned.
+    #[snafu(display("QR code expired"))]
     QrCodeExpired,
 
-    #[error("Login failed: {0}")]
-    LoginFailed(String),
+    /// The login flow failed for the given reason.
+    #[snafu(display("Login failed: {reason}"))]
+    LoginFailed {
+        /// Description of why the login failed.
+        reason: String,
+    },
 
-    #[error("No account found")]
+    /// No saved account was found in local storage.
+    #[snafu(display("No account found"))]
     NoAccount,
 
-    #[error("Encryption error: {0}")]
-    Encryption(String),
+    /// An AES encryption or decryption operation failed.
+    #[snafu(display("Encryption error: {reason}"))]
+    Encryption {
+        /// Description of the encryption failure.
+        reason: String,
+    },
 }
 
+/// A convenience alias for `Result<T, Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
