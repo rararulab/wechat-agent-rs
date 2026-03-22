@@ -1,0 +1,42 @@
+[package]
+name = "wechat-agent-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Rust SDK for WeChat Agent (iLink Bot) — ported from frostming/weixin-agent-sdk"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes = "0.8"
+ecb = "0.1"
+block-padding = "0.3"
+cipher = { version = "0.4", features = ["alloc"] }
+qrcode = "0.14"
+mime_guess = "2"
+tempfile = "3"
+thiserror = "2"
+async-trait = "0.1"
+rand = "0.9"
+hex = "0.4"
+dirs = "6"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+regex-lite = "0.1"
+chrono = "0.4"
+anyhow = "1"
+tracing-subscriber = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[example]]
+name = "echo_bot"
+path = "examples/echo_bot.rs"
+
+[[example]]
+name = "openai_bot"
+path = "examples/openai_bot.rs"
