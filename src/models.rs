@@ -1,17 +1,14 @@
-use std::{future::Future, pin::Pin};
-
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Trait that application code implements to handle incoming chat messages.
 ///
 /// The SDK calls [`Agent::chat`] for every incoming message and sends the
 /// returned [`ChatResponse`] back to the `WeChat` user.
+#[async_trait]
 pub trait Agent: Send + Sync {
     /// Processes an incoming chat request and returns a response.
-    fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> Pin<Box<dyn Future<Output = crate::Result<ChatResponse>> + Send + '_>>;
+    async fn chat(&self, request: ChatRequest) -> crate::Result<ChatResponse>;
 }
 
 /// An incoming chat message delivered to the agent.

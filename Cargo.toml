@@ -17,6 +17,7 @@ cipher = { version = "0.4", features = ["alloc"] }
 qrcode = "0.14"
 mime_guess = "2"
 tempfile = "3"
+async-trait = "0.1"
 snafu = "0.9"
 rand = "0.9"
 hex = "0.4"
