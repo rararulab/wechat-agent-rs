@@ -411,3 +411,4 @@ just pre-commit # 提交前全量检查（格式 + lint + 测试）
 ## 许可证
 
 [MIT](LICENSE)
+# test ci trigger
