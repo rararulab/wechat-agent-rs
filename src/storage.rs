@@ -111,3 +111,41 @@ pub fn get_account_config(account_id: &str) -> Option<AccountConfig> {
     let data = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&data).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_account_data_serde() {
+        let data = AccountData {
+            token:    "tok_abc".to_string(),
+            saved_at: "2025-01-01T00:00:00Z".to_string(),
+            base_url: "https://example.com".to_string(),
+            user_id:  "user_123".to_string(),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let deserialized: AccountData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.token, data.token);
+        assert_eq!(deserialized.saved_at, data.saved_at);
+        assert_eq!(deserialized.base_url, data.base_url);
+        assert_eq!(deserialized.user_id, data.user_id);
+    }
+
+    #[test]
+    fn test_account_config_serde() {
+        let config = AccountConfig {
+            route_tag: Some("tag_xyz".to_string()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: AccountConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.route_tag, Some("tag_xyz".to_string()));
+    }
+
+    #[test]
+    fn test_account_config_default_route_tag() {
+        let json = r"{}";
+        let config: AccountConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.route_tag, None);
+    }
+}

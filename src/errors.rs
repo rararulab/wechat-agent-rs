@@ -54,3 +54,79 @@ pub enum Error {
 
 /// A convenience alias for `Result<T, Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use snafu::IntoError;
+
+    use super::*;
+
+    #[test]
+    fn test_error_display_api() {
+        let err = ApiSnafu {
+            code:    42_i64,
+            message: "bad request".to_string(),
+        }
+        .build();
+        let display = format!("{err}");
+        assert!(
+            display.contains("42"),
+            "should contain error code, got: {display}"
+        );
+        assert!(
+            display.contains("bad request"),
+            "should contain message, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_error_display_login_failed() {
+        let err = LoginFailedSnafu {
+            reason: "invalid credentials".to_string(),
+        }
+        .build();
+        let display = format!("{err}");
+        assert!(
+            display.contains("invalid credentials"),
+            "should contain reason, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_error_display_encryption() {
+        let err = EncryptionSnafu {
+            reason: "bad key".to_string(),
+        }
+        .build();
+        let display = format!("{err}");
+        assert!(
+            display.contains("bad key"),
+            "should contain reason, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err: Error = IoSnafu.into_error(io_err);
+        assert!(
+            matches!(err, Error::Io { .. }),
+            "expected Io variant, got: {err:?}"
+        );
+        let display = format!("{err}");
+        assert!(
+            display.contains("file missing"),
+            "should contain source message, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_error_from_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let err: Error = JsonSnafu.into_error(json_err);
+        assert!(
+            matches!(err, Error::Json { .. }),
+            "expected Json variant, got: {err:?}"
+        );
+    }
+}

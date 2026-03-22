@@ -182,3 +182,24 @@ impl WeixinApiClient {
         self.post("ilink/bot/getuploadurl", &body).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_new() {
+        let client = WeixinApiClient::new("https://example.com/", "tok_123", None);
+        assert_eq!(client.base_url, "https://example.com");
+        assert_eq!(client.token, "tok_123");
+        assert!(client.route_tag.is_none());
+    }
+
+    #[test]
+    fn test_client_set_token() {
+        let mut client = WeixinApiClient::new("https://example.com", "old_token", None);
+        assert_eq!(client.token, "old_token");
+        client.set_token("new_token");
+        assert_eq!(client.token, "new_token");
+    }
+}

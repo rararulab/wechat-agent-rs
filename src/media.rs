@@ -144,4 +144,80 @@ mod tests {
         let decrypted = decrypt_aes_ecb(&key, &encrypted).unwrap();
         assert_eq!(decrypted, plaintext.to_vec());
     }
+
+    #[test]
+    fn test_aes_ecb_empty_data() {
+        let key = [0xAAu8; 16];
+        let plaintext = b"";
+        let encrypted = encrypt_aes_ecb(&key, plaintext);
+        let decrypted = decrypt_aes_ecb(&key, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext.to_vec());
+    }
+
+    #[test]
+    fn test_aes_ecb_large_data() {
+        let key = [0xBBu8; 16];
+        let plaintext = vec![0x42u8; 10 * 1024];
+        let encrypted = encrypt_aes_ecb(&key, &plaintext);
+        let decrypted = decrypt_aes_ecb(&key, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_aes_ecb_block_aligned() {
+        let key = [0xCCu8; 16];
+        let plaintext = [0xDDu8; 16];
+        let encrypted = encrypt_aes_ecb(&key, &plaintext);
+        let decrypted = decrypt_aes_ecb(&key, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext.to_vec());
+    }
+
+    #[test]
+    fn test_parse_aes_key_valid() {
+        let hex_key = "00112233445566778899aabbccddeeff";
+        let key = parse_aes_key(hex_key).unwrap();
+        assert_eq!(
+            key,
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_aes_key_invalid_hex() {
+        let result = parse_aes_key("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Encryption { .. }),
+            "expected Encryption error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_aes_key_wrong_length() {
+        // 24 hex chars = 12 bytes, not 16
+        let result = parse_aes_key("aabbccddeeff00112233aabb");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Encryption { .. }),
+            "expected Encryption error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_invalid_data() {
+        let key = [0xEEu8; 16];
+        let garbage = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let result = decrypt_aes_ecb(&key, &garbage);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Encryption { .. }),
+            "expected Encryption error, got: {err}"
+        );
+    }
 }

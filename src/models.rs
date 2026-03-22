@@ -98,3 +98,42 @@ pub struct StartOptions {
     /// Account ID to use; if `None`, the first saved account is used.
     pub account_id: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_response_default() {
+        let resp = ChatResponse::default();
+        assert!(resp.text.is_none());
+        assert!(resp.media.is_none());
+    }
+
+    #[test]
+    fn test_media_type_serde() {
+        for variant in [
+            MediaType::Image,
+            MediaType::Audio,
+            MediaType::Video,
+            MediaType::File,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: MediaType = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn test_outgoing_media_type_serde() {
+        for variant in [
+            OutgoingMediaType::Image,
+            OutgoingMediaType::Video,
+            OutgoingMediaType::File,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: OutgoingMediaType = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+}
