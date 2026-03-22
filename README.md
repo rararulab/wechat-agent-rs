@@ -1,6 +1,8 @@
 # wechat-agent-rs
 
-微信 Agent SDK 的 Rust 实现，从 [frostming/weixin-agent-sdk](https://github.com/frostming/weixin-agent-sdk) 移植。
+> **AI-Generated Project** — 本项目由 [Claude Code](https://claude.com/claude-code)（Claude Opus 4.6）全程生成，包括代码实现、测试、文档、CI/CD 配置，无人工编写代码。
+
+微信 Agent SDK 的 Rust 实现，从 [frostming/weixin-agent-sdk](https://github.com/frostming/weixin-agent-sdk)（Python）移植而来。原项目由 [Frost Ming](https://github.com/frostming) 开发，本项目是其 Rust 等价实现，保持相同的顶层 API 设计（`Agent` trait、`login()`、`start()`）。
 
 通过长轮询方式接收微信消息，并分发给 AI Agent 处理。无需搭建 HTTP 服务，开箱即用。
 
