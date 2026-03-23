@@ -13,9 +13,9 @@ const SESSION_EXPIRED_ERRCODE: i64 = -14;
 /// Handles authentication headers, request signing, and automatic
 /// session-expiry detection on every response.
 pub struct WeixinApiClient {
-    client: Client,
-    base_url: String,
-    token: String,
+    client:    Client,
+    base_url:  String,
+    token:     String,
     route_tag: Option<String>,
 }
 
@@ -32,9 +32,7 @@ impl WeixinApiClient {
     }
 
     /// Replaces the bearer token used for subsequent requests.
-    pub fn set_token(&mut self, token: &str) {
-        self.token = token.to_string();
-    }
+    pub fn set_token(&mut self, token: &str) { self.token = token.to_string(); }
 
     fn headers(&self) -> reqwest::header::HeaderMap {
         use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
