@@ -83,10 +83,10 @@ pub async fn login(options: LoginOptions) -> Result<String> {
                     .to_string();
 
                 let account_data = storage::AccountData {
-                    token: token.to_string(),
+                    token:    token.to_string(),
                     saved_at: chrono::Utc::now().to_rfc3339(),
                     base_url: base.to_string(),
-                    user_id: user_id.to_string(),
+                    user_id:  user_id.to_string(),
                 };
                 storage::save_account_data(&account_id, &account_data)?;
 

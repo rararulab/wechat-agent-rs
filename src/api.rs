@@ -141,7 +141,7 @@ impl WeixinApiClient {
                 .unwrap_or("unknown error")
                 .to_string();
             return Err(ApiSnafu {
-                code: ret,
+                code:    ret,
                 message: msg,
             }
             .build());
