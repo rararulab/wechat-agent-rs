@@ -21,16 +21,14 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     let client = WeixinApiClient::new(base_url, "", None);
 
     let qr_resp = client.fetch_qr_code().await?;
-    let qrcode_url = qr_resp["data"]["qrcode_url"]
+    let qrcode_url = qr_resp["qrcode_img_content"]
         .as_str()
         .context(LoginFailedSnafu {
-            reason: "no qrcode_url",
+            reason: "no qrcode_img_content in response",
         })?;
-    let qrcode_id = qr_resp["data"]["qrcode_id"]
-        .as_str()
-        .context(LoginFailedSnafu {
-            reason: "no qrcode_id",
-        })?;
+    let qrcode_id = qr_resp["qrcode"].as_str().context(LoginFailedSnafu {
+        reason: "no qrcode in response",
+    })?;
 
     let qr = qrcode::QrCode::new(qrcode_url.as_bytes()).map_err(|e| {
         LoginFailedSnafu {
@@ -49,7 +47,11 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let status_resp = client.get_qr_code_status(qrcode_id).await?;
-        let status = status_resp["data"]["status"].as_str().unwrap_or("unknown");
+        // Try top-level field first (v2 API), fall back to nested data.status (v1)
+        let status = status_resp["status"]
+            .as_str()
+            .or_else(|| status_resp["data"]["status"].as_str())
+            .unwrap_or("unknown");
 
         match status {
             "wait" => {}
@@ -60,7 +62,12 @@ pub async fn login(options: LoginOptions) -> Result<String> {
                 return Err(QrCodeExpiredSnafu.build());
             }
             "confirmed" => {
-                let data = &status_resp["data"];
+                // v2 API returns credentials at top level; v1 nests under data
+                let data = if status_resp.get("bot_token").is_some() {
+                    &status_resp
+                } else {
+                    &status_resp["data"]
+                };
                 let token = data["bot_token"].as_str().context(LoginFailedSnafu {
                     reason: "no bot_token",
                 })?;
