@@ -24,12 +24,14 @@ pub async fn login(options: LoginOptions) -> Result<String> {
     let qrcode_url = qr_resp["qrcode_img_content"]
         .as_str()
         .context(LoginFailedSnafu {
-            reason: "no qrcode_img_content in response",
+            reason: "no qrcode_url",
         })?;
-    let qrcode_id = qr_resp["qrcode"].as_str().context(LoginFailedSnafu {
-        reason: "no qrcode in response",
-    })?;
-
+    let qrcode = qr_resp["data"]["qrcode"]
+        .as_str()
+        .or_else(|| qr_resp["data"]["qrcode_id"].as_str())
+        .context(LoginFailedSnafu {
+            reason: "no qrcode",
+        })?;
     let qr = qrcode::QrCode::new(qrcode_url.as_bytes()).map_err(|e| {
         LoginFailedSnafu {
             reason: format!("QR generation failed: {e}"),
@@ -46,8 +48,7 @@ pub async fn login(options: LoginOptions) -> Result<String> {
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let status_resp = client.get_qr_code_status(qrcode_id).await?;
-        // Try top-level field first (v2 API), fall back to nested data.status (v1)
+        let status_resp = client.get_qr_code_status(qrcode).await?;
         let status = status_resp["status"]
             .as_str()
             .or_else(|| status_resp["data"]["status"].as_str())

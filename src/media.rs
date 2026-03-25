@@ -98,7 +98,11 @@ pub async fn upload_media(api_client: &WeixinApiClient, file_path: &Path) -> cra
     let aes_key_hex = hex::encode(key);
     let encrypted = encrypt_aes_ecb(&key, &data);
 
-    let upload_info = api_client.get_upload_url(file_name, file_size).await?;
+    let raw_md5 = format!("{:x}", md5::compute(&data));
+    let encrypted_size = encrypted.len() as u64;
+    let upload_info = api_client
+        .get_upload_url(file_name, 0, "", file_size, &raw_md5, encrypted_size, &aes_key_hex)
+        .await?;
     let upload_url = upload_info["data"]["upload_url"].as_str().ok_or_else(|| {
         ApiSnafu {
             code:    -1_i64,

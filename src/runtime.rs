@@ -133,10 +133,11 @@ async fn process_message(
     let text = body_from_item_list(&item_list);
 
     if let Some(echo_text) = text.strip_prefix("/echo ") {
+        let items = vec![serde_json::json!({"type": 0, "body": echo_text})];
         api_client
             .lock()
             .await
-            .send_text_message(to_user_id, context_token, echo_text)
+            .send_message(to_user_id, context_token, &items)
             .await?;
         return Ok(());
     }
@@ -144,7 +145,7 @@ async fn process_message(
     let _ = api_client
         .lock()
         .await
-        .send_typing(to_user_id, context_token)
+        .send_typing(to_user_id, context_token, 1)
         .await;
 
     let incoming_media = extract_media_from_items(&item_list).await;
@@ -187,19 +188,20 @@ async fn process_message(
             "body": uploaded,
         });
 
+        let mut items = vec![];
+        if let Some(ref t) = response.text {
+            items.push(serde_json::json!({"type": 0, "body": t}));
+        }
+        items.push(file_info);
         client
-            .send_media_message(
-                to_user_id,
-                context_token,
-                response.text.as_deref(),
-                &file_info,
-            )
+            .send_message(to_user_id, context_token, &items)
             .await?;
         drop(client);
     } else if let Some(text) = &response.text {
         let plain = markdown_to_plain_text(text);
+        let items = vec![serde_json::json!({"type": 0, "body": plain})];
         client
-            .send_text_message(to_user_id, context_token, &plain)
+            .send_message(to_user_id, context_token, &items)
             .await?;
         drop(client);
     }
