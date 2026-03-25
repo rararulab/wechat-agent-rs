@@ -8,8 +8,8 @@ use tracing::{error, warn};
 use crate::{
     api::WeixinApiClient,
     errors::{HttpSnafu, IoSnafu},
-    media::{download_media, upload_media},
-    models::{Agent, ChatRequest, IncomingMedia, MediaType},
+    media::{download_media_from_item, upload_media},
+    models::{Agent, ChatRequest, IncomingMedia},
     storage,
 };
 
@@ -175,17 +175,23 @@ async fn process_message(
         let tmp_path = tmp_dir.join(format!("{}_{file_name}", uuid::Uuid::new_v4()));
         std::fs::write(&tmp_path, &media_bytes).context(IoSnafu)?;
 
-        let uploaded = upload_media(&client, &tmp_path).await?;
-
         let media_type_id = match media.media_type {
             crate::models::OutgoingMediaType::Image => 1,
             crate::models::OutgoingMediaType::Video => 2,
             crate::models::OutgoingMediaType::File => 3,
         };
 
+        // TODO(Task 5): properly wire media_type and to_user_id
+        let uploaded = upload_media(&client, &tmp_path, media_type_id, to_user_id).await?;
+
         let file_info = serde_json::json!({
             "type": media_type_id,
-            "body": uploaded,
+            "body": {
+                "encrypt_query_param": uploaded.encrypt_query_param,
+                "aes_key": uploaded.aes_key,
+                "file_name": uploaded.file_name,
+                "file_size": uploaded.file_size,
+            },
         });
 
         let mut items = vec![];
@@ -212,34 +218,17 @@ async fn process_message(
 async fn extract_media_from_items(item_list: &[Value]) -> Option<IncomingMedia> {
     for item in item_list {
         let item_type = item["type"].as_u64().unwrap_or(0);
-        if matches!(item_type, 1..=5) {
-            let file_key = item["body"]["filekey"]
-                .as_str()
-                .or_else(|| item["filekey"].as_str())?;
-            let aes_key = item["body"]["aes_key"]
-                .as_str()
-                .or_else(|| item["aes_key"].as_str())?;
-            let file_name = item["body"]["file_name"]
-                .as_str()
-                .or_else(|| item["file_name"].as_str());
-
-            if let Ok(path) = download_media(file_key, aes_key, file_name).await {
-                let media_type = match item_type {
-                    1 => MediaType::Image,
-                    2 => MediaType::Video,
-                    4 | 5 => MediaType::Audio,
-                    _ => MediaType::File,
-                };
-                let mime = mime_guess::from_path(&path)
-                    .first_or_octet_stream()
-                    .to_string();
-                return Some(IncomingMedia {
-                    media_type,
-                    file_path: path.to_string_lossy().to_string(),
-                    mime_type: mime,
-                    file_name: file_name.map(String::from),
-                });
-            }
+        // Types 2-5 are media items (image, voice, file, video)
+        if matches!(item_type, 2..=5)
+            && let Ok((path, media_type, mime, file_name)) =
+                download_media_from_item(item, item_type).await
+        {
+            return Some(IncomingMedia {
+                media_type,
+                file_path: path.to_string_lossy().to_string(),
+                mime_type: mime,
+                file_name,
+            });
         }
     }
     None
