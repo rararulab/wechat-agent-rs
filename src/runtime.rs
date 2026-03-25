@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use serde_json::Value;
 use snafu::ResultExt;
@@ -8,10 +8,25 @@ use tracing::{error, warn};
 use crate::{
     api::WeixinApiClient,
     errors::{HttpSnafu, IoSnafu},
-    media::{download_media, upload_media},
-    models::{Agent, ChatRequest, IncomingMedia, MediaType},
+    media,
+    models::{Agent, ChatRequest, IncomingMedia, OutgoingMediaType},
     storage,
 };
+
+/// Message item type: text (1-based, aligned with Python SDK).
+const MESSAGE_ITEM_TEXT: u64 = 1;
+/// Message item type: image.
+const MESSAGE_ITEM_IMAGE: u64 = 2;
+/// Message item type: voice.
+const MESSAGE_ITEM_VOICE: u64 = 3;
+/// Message item type: file.
+const MESSAGE_ITEM_FILE: u64 = 4;
+/// Message item type: video.
+const MESSAGE_ITEM_VIDEO: u64 = 5;
+/// Typing indicator status: currently typing.
+const TYPING_STATUS_TYPING: u8 = 1;
+/// Typing indicator status: cancel typing.
+const TYPING_STATUS_CANCEL: u8 = 2;
 
 /// Strips `Markdown` formatting from text, returning a plain-text
 /// approximation.
@@ -37,33 +52,95 @@ pub fn markdown_to_plain_text(text: &str) -> String {
 }
 
 /// Extracts the text body from a `WeChat` `item_list` JSON array.
+///
+/// Handles text items (type=1) with optional quoted messages in `ref_msg`,
+/// and voice items (type=3) via transcription.
 pub fn body_from_item_list(item_list: &[Value]) -> String {
     let mut parts = vec![];
     for item in item_list {
         let item_type = item["type"].as_u64().unwrap_or(0);
         match item_type {
-            0 => {
+            MESSAGE_ITEM_TEXT => {
                 if let Some(body) = item["body"].as_str() {
                     parts.push(body.to_string());
                 }
-            }
-            5 => {
-                if let Some(trans) = item["voice_transcription_body"].as_str() {
-                    parts.push(trans.to_string());
+                if let Some(ref_msg) = item.get("ref_msg")
+                    && let Some(ref_items) = ref_msg["item_list"].as_array()
+                {
+                    let ref_text = body_from_item_list(ref_items);
+                    if !ref_text.is_empty() {
+                        parts.push(format!("[Quoted: {ref_text}]"));
+                    }
                 }
             }
-            7 => {
-                if let Some(ref_list) = item["ref_item_list"].as_array() {
-                    let ref_text = body_from_item_list(ref_list);
-                    if !ref_text.is_empty() {
-                        parts.push(format!("> {ref_text}"));
-                    }
+            MESSAGE_ITEM_VOICE => {
+                if let Some(trans) = item["voice_transcription_body"].as_str() {
+                    parts.push(trans.to_string());
                 }
             }
             _ => {}
         }
     }
     parts.join("\n")
+}
+
+/// Finds the highest-priority media item in the given item list.
+///
+/// Priority: IMAGE > VIDEO > FILE > VOICE (only when no text) > `ref_msg` media.
+/// Returns the item JSON and its type code.
+fn find_media_item(item_list: &[Value], has_text: bool) -> Option<(Value, u64)> {
+    // Check for image, video, file in priority order
+    for &target in &[MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO, MESSAGE_ITEM_FILE] {
+        for item in item_list {
+            if item["type"].as_u64() == Some(target) {
+                return Some((item.clone(), target));
+            }
+        }
+    }
+    // Voice only when there is no text body
+    if !has_text {
+        for item in item_list {
+            if item["type"].as_u64() == Some(MESSAGE_ITEM_VOICE) {
+                return Some((item.clone(), MESSAGE_ITEM_VOICE));
+            }
+        }
+    }
+    // Recurse into quoted/referenced messages
+    for item in item_list {
+        if let Some(ref_msg) = item.get("ref_msg")
+            && let Some(ref_items) = ref_msg["item_list"].as_array()
+            && let Some(found) = find_media_item(ref_items, has_text)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Builds a per-type outgoing media item JSON for `send_message`.
+fn build_media_send_item(
+    upload: &media::UploadResult,
+    outgoing_type: OutgoingMediaType,
+) -> Value {
+    let media_obj = serde_json::json!({
+        "encrypt_query_param": upload.encrypt_query_param,
+        "aes_key": upload.aes_key,
+        "encrypt_type": 1,
+    });
+    match outgoing_type {
+        OutgoingMediaType::Video => serde_json::json!({
+            "type": MESSAGE_ITEM_VIDEO,
+            "video_item": {"media": media_obj, "video_size": upload.file_size}
+        }),
+        OutgoingMediaType::Image => serde_json::json!({
+            "type": MESSAGE_ITEM_IMAGE,
+            "image_item": {"media": media_obj, "mid_size": upload.file_size}
+        }),
+        OutgoingMediaType::File => serde_json::json!({
+            "type": MESSAGE_ITEM_FILE,
+            "file_item": {"media": media_obj, "file_name": upload.file_name, "len": upload.file_size}
+        }),
+    }
 }
 
 /// Runs the long-polling message loop, dispatching each message to `agent`.
@@ -102,7 +179,8 @@ pub async fn monitor_weixin(
                 }
             }
             Err(crate::Error::SessionExpired) => {
-                warn!("Session expired, need to re-login");
+                warn!("Session expired, sleeping 1 hour before exit");
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 break;
             }
             Err(crate::Error::Http { ref source }) if source.is_timeout() => {}
@@ -121,126 +199,141 @@ pub async fn monitor_weixin(
     }
 }
 
+/// Downloads an outgoing media file from its URL, uploads to CDN, and sends it.
+async fn send_outgoing_media(
+    client: &WeixinApiClient,
+    outgoing_media: &crate::models::OutgoingMedia,
+    to_user_id: &str,
+    context_token: &str,
+) -> crate::Result<()> {
+    let http_client = reqwest::Client::new();
+    let media_bytes = http_client
+        .get(&outgoing_media.url)
+        .send()
+        .await
+        .context(HttpSnafu)?
+        .bytes()
+        .await
+        .context(HttpSnafu)?;
+    let tmp_dir = std::path::Path::new("/tmp/weixin-agent/media/upload");
+    std::fs::create_dir_all(tmp_dir).context(IoSnafu)?;
+    let file_name = outgoing_media.file_name.as_deref().unwrap_or("file");
+    let tmp_path = tmp_dir.join(format!("{}_{file_name}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp_path, &media_bytes).context(IoSnafu)?;
+    let upload_media_type = match outgoing_media.media_type {
+        OutgoingMediaType::Image => media::UPLOAD_MEDIA_IMAGE,
+        OutgoingMediaType::Video => media::UPLOAD_MEDIA_VIDEO,
+        OutgoingMediaType::File => media::UPLOAD_MEDIA_FILE,
+    };
+    let uploaded = media::upload_media(client, &tmp_path, upload_media_type, to_user_id).await?;
+    let media_item = build_media_send_item(&uploaded, outgoing_media.media_type);
+    client
+        .send_message(to_user_id, context_token, &[media_item])
+        .await?;
+    Ok(())
+}
+
 async fn process_message(
     api_client: Arc<Mutex<WeixinApiClient>>,
     agent: Arc<dyn Agent>,
     msg: &Value,
 ) -> crate::Result<()> {
     let item_list = msg["item_list"].as_array().cloned().unwrap_or_default();
-    let to_user_id = msg["to_user_id"].as_str().unwrap_or("");
+    let from_user_id = msg["from_user_id"].as_str().unwrap_or("");
     let context_token = msg["context_token"].as_str().unwrap_or("");
-
     let text = body_from_item_list(&item_list);
 
+    // Slash commands
     if let Some(echo_text) = text.strip_prefix("/echo ") {
+        let item = serde_json::json!({"type": MESSAGE_ITEM_TEXT, "body": echo_text});
         api_client
             .lock()
             .await
-            .send_text_message(to_user_id, context_token, echo_text)
+            .send_message(from_user_id, context_token, &[item])
             .await?;
         return Ok(());
     }
 
+    // Typing indicator
     let _ = api_client
         .lock()
         .await
-        .send_typing(to_user_id, context_token)
+        .send_typing(from_user_id, context_token, TYPING_STATUS_TYPING)
         .await;
 
-    let incoming_media = extract_media_from_items(&item_list).await;
+    // Extract and download media
+    let has_text = !text.is_empty();
+    let incoming_media =
+        if let Some((media_item, media_type)) = find_media_item(&item_list, has_text) {
+            match media::download_media_from_item(&media_item, media_type).await {
+                Ok((path, mt, mime, fname)) => Some(IncomingMedia {
+                    media_type: mt,
+                    file_path: path.to_string_lossy().to_string(),
+                    mime_type: mime,
+                    file_name: fname,
+                }),
+                Err(e) => {
+                    warn!("Failed to download media: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     let request = ChatRequest {
-        conversation_id: to_user_id.to_string(),
+        conversation_id: from_user_id.to_string(),
         text,
         media: incoming_media,
     };
 
-    let response = agent.chat(request).await?;
+    // Call agent -- on error, send error text to user then propagate
+    let response = match agent.chat(request).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("Agent error: {e}");
+            let client = api_client.lock().await;
+            let err_item = serde_json::json!({
+                "type": MESSAGE_ITEM_TEXT,
+                "body": format!("Error: {e}")
+            });
+            let _ = client
+                .send_message(from_user_id, context_token, &[err_item])
+                .await;
+            let _ = client
+                .send_typing(from_user_id, context_token, TYPING_STATUS_CANCEL)
+                .await;
+            drop(client);
+            return Err(e);
+        }
+    };
 
     let client = api_client.lock().await;
-    if let Some(ref media) = response.media {
-        let http_client = reqwest::Client::new();
-        let media_bytes = http_client
-            .get(&media.url)
-            .send()
-            .await
-            .context(HttpSnafu)?
-            .bytes()
-            .await
-            .context(HttpSnafu)?;
-        let tmp_dir = Path::new("/tmp/weixin-agent/media");
-        std::fs::create_dir_all(tmp_dir).context(IoSnafu)?;
-        let file_name = media.file_name.as_deref().unwrap_or("file");
-        let tmp_path = tmp_dir.join(format!("{}_{file_name}", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp_path, &media_bytes).context(IoSnafu)?;
 
-        let uploaded = upload_media(&client, &tmp_path).await?;
-
-        let media_type_id = match media.media_type {
-            crate::models::OutgoingMediaType::Image => 1,
-            crate::models::OutgoingMediaType::Video => 2,
-            crate::models::OutgoingMediaType::File => 3,
-        };
-
-        let file_info = serde_json::json!({
-            "type": media_type_id,
-            "body": uploaded,
-        });
-
-        client
-            .send_media_message(
-                to_user_id,
-                context_token,
-                response.text.as_deref(),
-                &file_info,
-            )
-            .await?;
-        drop(client);
-    } else if let Some(text) = &response.text {
-        let plain = markdown_to_plain_text(text);
-        client
-            .send_text_message(to_user_id, context_token, &plain)
-            .await?;
-        drop(client);
-    }
-
-    Ok(())
-}
-
-async fn extract_media_from_items(item_list: &[Value]) -> Option<IncomingMedia> {
-    for item in item_list {
-        let item_type = item["type"].as_u64().unwrap_or(0);
-        if matches!(item_type, 1..=5) {
-            let file_key = item["body"]["filekey"]
-                .as_str()
-                .or_else(|| item["filekey"].as_str())?;
-            let aes_key = item["body"]["aes_key"]
-                .as_str()
-                .or_else(|| item["aes_key"].as_str())?;
-            let file_name = item["body"]["file_name"]
-                .as_str()
-                .or_else(|| item["file_name"].as_str());
-
-            if let Ok(path) = download_media(file_key, aes_key, file_name).await {
-                let media_type = match item_type {
-                    1 => MediaType::Image,
-                    2 => MediaType::Video,
-                    4 | 5 => MediaType::Audio,
-                    _ => MediaType::File,
-                };
-                let mime = mime_guess::from_path(&path)
-                    .first_or_octet_stream()
-                    .to_string();
-                return Some(IncomingMedia {
-                    media_type,
-                    file_path: path.to_string_lossy().to_string(),
-                    mime_type: mime,
-                    file_name: file_name.map(String::from),
-                });
-            }
+    // Send text and media as SEPARATE messages (aligned with Python SDK)
+    if let Some(ref outgoing_media) = response.media {
+        if let Some(ref resp_text) = response.text {
+            let plain = markdown_to_plain_text(resp_text);
+            let text_item = serde_json::json!({"type": MESSAGE_ITEM_TEXT, "body": plain});
+            let _ = client
+                .send_message(from_user_id, context_token, &[text_item])
+                .await;
         }
+        send_outgoing_media(&client, outgoing_media, from_user_id, context_token).await?;
+    } else if let Some(ref resp_text) = response.text {
+        let plain = markdown_to_plain_text(resp_text);
+        let text_item = serde_json::json!({"type": MESSAGE_ITEM_TEXT, "body": plain});
+        client
+            .send_message(from_user_id, context_token, &[text_item])
+            .await?;
     }
-    None
+
+    // Cancel typing
+    let _ = client
+        .send_typing(from_user_id, context_token, TYPING_STATUS_CANCEL)
+        .await;
+    drop(client);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -330,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_text_item() {
-        let items = vec![serde_json::json!({"type": 0, "body": "hello world"})];
+        let items = vec![serde_json::json!({"type": 1, "body": "hello world"})];
         let result = body_from_item_list(&items);
         assert_eq!(result, "hello world");
     }
@@ -338,7 +431,7 @@ mod tests {
     #[test]
     fn test_voice_transcription() {
         let items = vec![serde_json::json!({
-            "type": 5,
+            "type": 3,
             "voice_transcription_body": "transcribed text"
         })];
         let result = body_from_item_list(&items);
@@ -348,18 +441,19 @@ mod tests {
     #[test]
     fn test_quoted_message() {
         let items = vec![serde_json::json!({
-            "type": 7,
-            "ref_item_list": [{"type": 0, "body": "original message"}]
+            "type": 1,
+            "body": "reply",
+            "ref_msg": {"item_list": [{"type": 1, "body": "original message"}]}
         })];
         let result = body_from_item_list(&items);
-        assert_eq!(result, "> original message");
+        assert_eq!(result, "reply\n[Quoted: original message]");
     }
 
     #[test]
     fn test_multiple_items() {
         let items = vec![
-            serde_json::json!({"type": 0, "body": "first"}),
-            serde_json::json!({"type": 0, "body": "second"}),
+            serde_json::json!({"type": 1, "body": "first"}),
+            serde_json::json!({"type": 1, "body": "second"}),
         ];
         let result = body_from_item_list(&items);
         assert_eq!(result, "first\nsecond");
@@ -377,5 +471,91 @@ mod tests {
         let items = vec![serde_json::json!({"type": 99, "body": "ignored"})];
         let result = body_from_item_list(&items);
         assert_eq!(result, "");
+    }
+
+    // -- find_media_item tests --
+
+    #[test]
+    fn test_find_media_image_priority() {
+        let items = vec![
+            serde_json::json!({"type": MESSAGE_ITEM_FILE, "file_item": {}}),
+            serde_json::json!({"type": MESSAGE_ITEM_IMAGE, "image_item": {}}),
+        ];
+        let (_, t) = find_media_item(&items, false).unwrap();
+        assert_eq!(t, MESSAGE_ITEM_IMAGE);
+    }
+
+    #[test]
+    fn test_find_media_voice_skipped_when_text() {
+        let items = vec![serde_json::json!({"type": MESSAGE_ITEM_VOICE})];
+        assert!(find_media_item(&items, true).is_none());
+    }
+
+    #[test]
+    fn test_find_media_voice_when_no_text() {
+        let items = vec![serde_json::json!({"type": MESSAGE_ITEM_VOICE})];
+        let (_, t) = find_media_item(&items, false).unwrap();
+        assert_eq!(t, MESSAGE_ITEM_VOICE);
+    }
+
+    #[test]
+    fn test_find_media_in_ref_msg() {
+        let items = vec![serde_json::json!({
+            "type": MESSAGE_ITEM_TEXT,
+            "body": "look at this",
+            "ref_msg": {
+                "item_list": [{"type": MESSAGE_ITEM_IMAGE, "image_item": {}}]
+            }
+        })];
+        let (_, t) = find_media_item(&items, true).unwrap();
+        assert_eq!(t, MESSAGE_ITEM_IMAGE);
+    }
+
+    #[test]
+    fn test_find_media_none() {
+        let items = vec![serde_json::json!({"type": MESSAGE_ITEM_TEXT, "body": "hi"})];
+        assert!(find_media_item(&items, false).is_none());
+    }
+
+    // -- build_media_send_item tests --
+
+    #[test]
+    fn test_build_image_send_item() {
+        let upload = media::UploadResult {
+            encrypt_query_param: "eqp".to_string(),
+            aes_key: "key".to_string(),
+            file_name: "img.png".to_string(),
+            file_size: 1024,
+        };
+        let item = build_media_send_item(&upload, OutgoingMediaType::Image);
+        assert_eq!(item["type"], MESSAGE_ITEM_IMAGE);
+        assert!(item["image_item"]["media"]["encrypt_query_param"].is_string());
+    }
+
+    #[test]
+    fn test_build_video_send_item() {
+        let upload = media::UploadResult {
+            encrypt_query_param: "eqp".to_string(),
+            aes_key: "key".to_string(),
+            file_name: "vid.mp4".to_string(),
+            file_size: 2048,
+        };
+        let item = build_media_send_item(&upload, OutgoingMediaType::Video);
+        assert_eq!(item["type"], MESSAGE_ITEM_VIDEO);
+        assert!(item["video_item"]["media"]["encrypt_query_param"].is_string());
+    }
+
+    #[test]
+    fn test_build_file_send_item() {
+        let upload = media::UploadResult {
+            encrypt_query_param: "eqp".to_string(),
+            aes_key: "key".to_string(),
+            file_name: "doc.pdf".to_string(),
+            file_size: 4096,
+        };
+        let item = build_media_send_item(&upload, OutgoingMediaType::File);
+        assert_eq!(item["type"], MESSAGE_ITEM_FILE);
+        assert_eq!(item["file_item"]["file_name"], "doc.pdf");
+        assert_eq!(item["file_item"]["len"], 4096);
     }
 }
